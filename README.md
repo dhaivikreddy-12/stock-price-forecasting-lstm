@@ -1,55 +1,77 @@
 # 📈 Stock Price Forecasting with LSTM
 
-> *"Nobody can predict the market. But a model can learn its patterns well enough to be a useful (and humble) guide."*
+> *"Nobody can predict the market. But a model can learn its shape well enough to be a useful — and very humble — guide."*
 
-My first time-series deep learning project. It uses an LSTM (Long Short-Term Memory) network in PyTorch to forecast stock prices from historical data. I learned quickly that predicting prices is *hard* — the goal here isn't to get rich, it's to understand how sequence models work and to be honest about their limits.
+My first time-series deep learning project. An LSTM in PyTorch trained on **1,255 real daily trading sessions of AAPL** pulled live from Yahoo Finance. The honest headline: this model tracks trend well and lags at turning points, and understanding *why* was worth more than any accuracy number.
 
 ## What this project does
 
-- Generates (or loads) a realistic stock-price time series.
-- Builds sliding-window sequences for the LSTM to learn from.
-- Defines a small LSTM model in PyTorch.
-- Trains it to predict the next day's price from the past 30 days.
-- Compares predictions against actual prices with a clean chart.
+- Downloads real daily OHLCV data for a ticker (AAPL by default) from Yahoo Finance, with retries.
+- Caches the data locally so reruns work offline.
+- Builds sliding 30-session windows and min-max normalises the series.
+- Trains a 2-layer LSTM with dropout to predict the next session's close.
+- Reports RMSE in dollars and MAPE.
+- Forecasts 30 sessions ahead and charts predictions against actuals.
 
 ## The data
 
-I generated synthetic-but-plausible daily prices (a random-walk with drift and volatility), so the project runs offline. The repo also supports swapping in real data via `data/stock.csv` if you have any.
+Yahoo Finance chart API, 5 years of daily bars:
+
+| Column | Description |
+|---|---|
+| `date` | Trading session date |
+| `open` / `high` / `low` / `close` | Daily OHLC prices |
+| `volume` | Share volume |
+| `ticker` | Symbol |
+
+Retrieved range at time of writing: **2021-10-07 → 2026-10-07** (1,255 sessions).
 
 ## How to run it
 
 ```bash
 pip install -r requirements.txt
 
-# Generate data + train + forecast
-python train_lstm.py
+python -m src.train_lstm   # fetches data, trains, forecasts
 ```
+
+To pull fresh data instead of using the cache, delete `data/stock.csv` first. Swap the ticker by changing `TICKER` in `src/data_gen.py`.
 
 ## Project structure
 
 ```
 stock-price-forecasting-lstm/
 ├── src/
-│   ├── data_gen.py        # synthetic price generation
-│   ├── model.py           # LSTM definition
-│   └── train_lstm.py      # training + forecasting
+│   ├── data_gen.py     # Yahoo Finance fetch + cache
+│   ├── model.py        # PriceLSTM definition
+│   └── train_lstm.py   # sequences, training, forecast, chart
+├── data/
+│   └── stock.csv
 ├── plots/
-│   └── forecast.png       # actual vs predicted chart
+│   └── forecast.png
+├── tests/
 ├── requirements.txt
 └── README.md
 ```
 
 ## What I learned
 
-- Why time series needs sequence models (order matters!).
-- What an LSTM's memory cells actually help with — and don't.
-- The danger of overfitting a chart that "looks right".
-- That you must normalize prices, never feed raw dollars to a network.
+- Why time series needs sequence models: the order of observations *is* the signal.
+- That you must never feed raw dollar values to a network — normalise first.
+- How a sequence model learns momentum and quietly fails at reversals.
+- That MAPE is the metric that made sense here, because RMSE in dollars looks precise and isn't.
 
 ## Results
 
-The LSTM learns the *trend* well and tracks short-term moves reasonably, but — as expected — it lags at turning points. That's the honest reality of financial forecasting, and it's the most valuable lesson this project teaches.
+80/20 chronological split, 40 epochs, 30-session windows:
+
+| Metric | Value |
+|---|---|
+| Test RMSE | $11.01 |
+| Test MAPE | 3.03% |
+| Training MSE | 0.0009 (normalised units) |
+
+A 3% average error is a reasonable trend-follower, not an oracle. The forecast chart marks the actual/predicted boundary with a dotted line — past it, the model is extrapolating, and you can see it doesn't know what happens next.
 
 ---
 
-*Built with Python, PyTorch, pandas, matplotlib. Made for learning, by a student, for students.*
+*Built with Python, PyTorch, pandas, matplotlib. Real market data, honestly measured. Not financial advice.*

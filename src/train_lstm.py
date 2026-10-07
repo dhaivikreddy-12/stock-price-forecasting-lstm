@@ -1,11 +1,5 @@
-"""Train LSTM and forecast future stock prices."""
+"""Train an LSTM on real stock prices and forecast the next 30 sessions."""
 import os
-import subprocess
-import sys
-
-if not os.path.exists("data/stock.csv"):
-    subprocess.run([sys.executable, "src/data_gen.py"], check=True)
-
 import numpy as np
 import pandas as pd
 import torch
@@ -14,68 +8,70 @@ from torch.utils.data import DataLoader, TensorDataset
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
 from src.model import PriceLSTM
+from src.data_gen import load, TICKER
 
 torch.manual_seed(0)
 
-df = pd.read_csv("data/stock.csv")
-prices = df["close"].values.astype(np.float32)
+df = load()
+print(f"Loaded {len(df)} sessions for {TICKER}")
+print(f"Range: {df['date'].min().date()} -> {df['date'].max().date()}")
 
-# Normalize to [0, 1]
-pmin, pmax = prices.min(), prices.max()
-prices_n = (prices - pmin) / (pmax - pmin)
+prices = df["close"].to_numpy(dtype=np.float32)
+
+# Normalise to [0, 1] - never feed raw dollar values to an LSTM.
+pmin, pmax = float(prices.min()), float(prices.max())
+norm = (prices - pmin) / (pmax - pmin)
 
 
 def make_sequences(data, seq_len):
-    xs, ys = [], []
-    for i in range(len(data) - seq_len):
-        xs.append(data[i:i + seq_len])
-        ys.append(data[i + seq_len])
-    return np.array(xs), np.array(ys)
+    xs = np.array([data[i:i + seq_len] for i in range(len(data) - seq_len)])
+    ys = np.array([data[i + seq_len] for i in range(len(data) - seq_len)])
+    return xs[:, :, None], ys
 
 
 SEQ_LEN = 30
-X, y = make_sequences(prices_n, SEQ_LEN)
-X = X[:, :, None]
+X, y = make_sequences(norm, SEQ_LEN)
 
 split = int(0.8 * len(X))
 X_train, y_train = X[:split], y[:split]
 X_test, y_test = X[split:], y[split:]
 
-train_ds = TensorDataset(torch.tensor(X_train), torch.tensor(y_train))
-test_ds = TensorDataset(torch.tensor(X_test), torch.tensor(y_test))
-train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-test_loader = DataLoader(test_ds, batch_size=128)
+train_loader = DataLoader(TensorDataset(torch.tensor(X_train), torch.tensor(y_train)), batch_size=64, shuffle=True)
+test_loader = DataLoader(TensorDataset(torch.tensor(X_test), torch.tensor(y_test)), batch_size=256)
 
-model = PriceLSTM()
+model = PriceLSTM(input_size=1, hidden_size=64, num_layers=2, dropout=0.2)
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-epochs = 25
-for epoch in range(1, epochs + 1):
+EPOCHS = 40
+for epoch in range(1, EPOCHS + 1):
     model.train()
-    total_loss = 0
+    running = 0.0
     for xb, yb in train_loader:
         optimizer.zero_grad()
-        out = model(xb)
-        loss = criterion(out.squeeze(), yb)
+        loss = criterion(model(xb).squeeze(), yb)
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * len(xb)
+        running += loss.item() * xb.size(0)
     if epoch % 5 == 0 or epoch == 1:
-        print(f"Epoch {epoch:>2}/{epochs} | loss {total_loss/len(train_ds):.6f}")
+        print(f"Epoch {epoch:>2}/{EPOCHS} | train MSE {running/len(X_train):.6f}")
 
 model.eval()
 with torch.no_grad():
-    preds = model(torch.tensor(X_test)).squeeze().numpy()
+    preds = torch.cat([model(xb) for xb, _ in test_loader]).squeeze().numpy()
 
-preds_prices = preds * (pmax - pmin) + pmin
+pred_prices = preds * (pmax - pmin) + pmin
 actual_prices = y_test * (pmax - pmin) + pmin
 
-# Forecast next 30 days beyond the data
-last_seq = torch.tensor(X[-1:]).float()
+rmse = float(np.sqrt(np.mean((pred_prices - actual_prices) ** 2)))
+mape = float(np.mean(np.abs((actual_prices - pred_prices) / actual_prices)) * 100)
+print(f"\nTest RMSE ${rmse:.2f} | MAPE {mape:.2f}%")
+
+# Forecast 30 sessions beyond the end of the data.
+current = torch.tensor(X[-1:]).float()
 future = []
-current = last_seq
 with torch.no_grad():
     for _ in range(30):
         p = model(current)
@@ -83,18 +79,18 @@ with torch.no_grad():
         current = torch.cat([current[:, 1:, :], p.view(1, 1, 1)], dim=1)
 future = np.array(future) * (pmax - pmin) + pmin
 
+test_start = len(prices) - len(actual_prices)
 plt.figure(figsize=(12, 5))
-plt.plot(range(len(prices_n) - len(X_test), len(prices_n) - len(X_test) + len(actual_prices)),
-         actual_prices, label="Actual", alpha=0.7)
-plt.plot(range(len(prices_n) - len(X_test), len(prices_n) - len(X_test) + len(preds_prices)),
-         preds_prices, label="Predicted (test)", alpha=0.7)
-plt.plot(range(len(prices_n), len(prices_n) + 30), future, label="Forecast +30 days", linestyle="--")
-plt.xlabel("Days")
-plt.ylabel("Price ($)")
-plt.title("LSTM Stock Price Forecast")
+plt.plot(range(test_start, test_start + len(actual_prices)), actual_prices, label="Actual", alpha=0.8)
+plt.plot(range(test_start, test_start + len(pred_prices)), pred_prices, label="LSTM prediction", alpha=0.8)
+plt.plot(range(len(prices), len(prices) + 30), future, "k--", label="Forecast +30 sessions")
+plt.axvline(len(prices), color="grey", lw=0.8, ls=":")
+plt.xlabel("Trading session")
+plt.ylabel("Close price ($)")
+plt.title(f"{TICKER} LSTM Forecast (RMSE ${rmse:.2f})")
 plt.legend()
 plt.tight_layout()
 os.makedirs("plots", exist_ok=True)
 plt.savefig("plots/forecast.png", dpi=120)
 print("Saved forecast chart to plots/forecast.png")
-print(f"Final predicted price: ${future[-1]:.2f}")
+print(f"Last close ${prices[-1]:.2f} -> 30-session forecast ${future[-1]:.2f}")
